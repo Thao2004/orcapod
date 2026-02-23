@@ -584,6 +584,7 @@ async fn process_pod_packet(
         namespace_lookup,
         None,
         None,
+        None,
     )?;
 
     let mut services = JoinSet::new();

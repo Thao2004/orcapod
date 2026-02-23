@@ -2,7 +2,7 @@ use crate::{
     core::util::get,
     uniffi::{
         error::{Result, selector},
-        model::{PathSet, PodJob},
+        model::{BlobKind, PathSet, PodJob},
         orchestrator::{PodRunInfo, PodStatus, docker::LocalDockerOrchestrator},
     },
 };
@@ -38,18 +38,82 @@ impl LocalDockerOrchestrator {
     fn prepare_mount_binds(
         namespace_lookup: &HashMap<String, PathBuf>,
         pod_job: &PodJob,
-    ) -> Result<(Vec<String>, [String; 1])> {
-        // all host mounted paths need to be absolute
-        let host_output_directory = path::absolute(
-            namespace_lookup[&pod_job.output_dir.namespace].join(&pod_job.output_dir.path),
-        )?;
-        // Ensure output directory exists to prevent permissions issues if daemon's owner is root
-        fs::create_dir_all(&host_output_directory)?;
-        let output_bind = [format!(
-            "{}:{}",
-            host_output_directory.to_string_lossy(),
-            pod_job.pod.output_dir.to_string_lossy(),
-        )];
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let output_binds = if let Some(output_packet) = &pod_job.output_packet {
+            let mut binds: Vec<String> = vec![];
+
+            // If any output_spec stream is not covered by output_packet, mount the fallback
+            // output_dir so those files are still persisted rather than silently lost.
+            // This bind is added first so that per-stream mounts below can overlay it for the
+            // specific paths they cover (Docker applies more specific file mounts last).
+            let has_uncovered = pod_job
+                .pod
+                .output_spec
+                .keys()
+                .any(|k| !output_packet.0.contains_key(k));
+            if has_uncovered {
+                let host_output_dir = path::absolute(
+                    namespace_lookup[&pod_job.output_dir.namespace]
+                        .join(&pod_job.output_dir.path),
+                )?;
+                fs::create_dir_all(&host_output_dir)?;
+                binds.push(format!(
+                    "{}:{}",
+                    host_output_dir.to_string_lossy(),
+                    pod_job.pod.output_dir.to_string_lossy(),
+                ));
+            }
+
+            // Per-stream bind mounts for covered streams. When a fallback dir bind is also
+            // present, these overlay it for their specific paths.
+            for (stream_name, path_set) in &output_packet.0 {
+                let Some(path_info) = pod_job.pod.output_spec.get(stream_name) else {
+                    continue;
+                };
+                let internal_path = pod_job.pod.output_dir.join(&path_info.path);
+                if let PathSet::Unary { blob } = path_set {
+                    let host_path = path::absolute(
+                        get(namespace_lookup, &blob.location.namespace)?
+                            .join(&blob.location.path),
+                    )?;
+                    match blob.kind {
+                        BlobKind::File => {
+                            fs::create_dir_all(
+                                host_path.parent().context(selector::NoFileName {
+                                    path: host_path.clone(),
+                                })?,
+                            )?;
+                            // Docker requires the host file to already exist for file-level
+                            // bind mounts; pre-create an empty file at the target location.
+                            fs::write(&host_path, "")?;
+                        }
+                        BlobKind::Directory => {
+                            fs::create_dir_all(&host_path)?;
+                        }
+                    }
+                    binds.push(format!(
+                        "{}:{}",
+                        host_path.to_string_lossy(),
+                        internal_path.to_string_lossy(),
+                    ));
+                }
+                // PathSet::Collection is not applicable for output streams; skip.
+            }
+
+            binds
+        } else {
+            // Default: mount the entire output_dir to the pod's internal output directory.
+            let host_output_directory = path::absolute(
+                namespace_lookup[&pod_job.output_dir.namespace].join(&pod_job.output_dir.path),
+            )?;
+            // Ensure output directory exists to prevent permissions issues if daemon's owner is root
+            fs::create_dir_all(&host_output_directory)?;
+            vec![format!(
+                "{}:{}",
+                host_output_directory.to_string_lossy(),
+                pod_job.pod.output_dir.to_string_lossy(),
+            )]
+        };
         let input_binds = pod_job.pod.input_spec.iter().try_fold::<_, _, Result<_>>(
             vec![],
             |mut flattened_binds, (stream_name, stream_info)| {
@@ -92,7 +156,7 @@ impl LocalDockerOrchestrator {
                 Ok(flattened_binds)
             },
         )?;
-        Ok((input_binds, output_bind))
+        Ok((input_binds, output_binds))
     }
     #[expect(
         clippy::cast_possible_wrap,
@@ -114,7 +178,7 @@ impl LocalDockerOrchestrator {
         Config<String>,
     )> {
         // Prepare configuration
-        let (input_binds, output_bind) = Self::prepare_mount_binds(namespace_lookup, pod_job)?;
+        let (input_binds, output_binds) = Self::prepare_mount_binds(namespace_lookup, pod_job)?;
         let container_name = Generator::with_naming(Name::Plain)
             .next()
             .context(selector::GeneratedNamesOverflow)?;
@@ -150,7 +214,7 @@ impl LocalDockerOrchestrator {
                 host_config: Some(HostConfig {
                     nano_cpus: Some((pod_job.cpu_limit * 10_f32.powi(9)) as i64), // ncpu, ucores=3, mcores=6, cores=9
                     memory: Some(pod_job.memory_limit as i64),
-                    binds: Some([&*input_binds, &output_bind].concat()),
+                    binds: Some([&*input_binds, &*output_binds].concat()),
                     ..Default::default()
                 }),
                 labels: Some(labels),

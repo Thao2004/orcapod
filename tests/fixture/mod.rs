@@ -186,6 +186,7 @@ pub fn pod_job_style(namespace_lookup: &HashMap<String, PathBuf, RandomState>) -
             ("ZZZ".to_owned(), "PLEASE".to_owned()),
             ("AAA".to_owned(), "SORT".to_owned()),
         ])),
+        None,
     )
 }
 
@@ -235,6 +236,7 @@ pub fn pod_job_custom(
         1.0,          // 1000 millicores as frac cores
         10_u64 << 20, // 2GiB in bytes, KiB=<<10, MiB=<<20, GiB=<<30
         namespace_lookup,
+        None,
         None,
         None,
     )

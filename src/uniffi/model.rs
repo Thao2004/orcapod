@@ -139,6 +139,11 @@ pub struct PodJob {
     /// Environment variables to be set in environment.
     #[serde(serialize_with = "serialize_hashmap_option")]
     pub env_vars: Option<HashMap<String, String>>,
+    /// Attached, external output packet for fine-grained stream-to-location mapping.
+    /// When provided, each entry maps an output stream name to its desired external URI,
+    /// replacing the single `output_dir` bind mount with per-stream bind mounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_packet: Option<Arc<Packet>>,
 }
 
 #[uniffi::export]
@@ -148,7 +153,7 @@ impl PodJob {
     /// # Errors
     ///
     /// Will return `Err` if there is an issue initializing a `PodJob` instance.
-    #[uniffi::constructor(default(annotation=None, env_vars = None))]
+    #[uniffi::constructor(default(annotation=None, env_vars = None, output_packet = None))]
     pub fn new(
         pod: Arc<Pod>,
         mut input_packet: Arc<Packet>,
@@ -158,6 +163,7 @@ impl PodJob {
         namespace_lookup: &HashMap<String, PathBuf>,
         annotation: Option<Annotation>,
         env_vars: Option<HashMap<String, String>>,
+        output_packet: Option<Arc<Packet>>,
     ) -> Result<Self> {
         input_packet = Packet(
             input_packet
@@ -192,6 +198,7 @@ impl PodJob {
             cpu_limit,
             memory_limit,
             env_vars,
+            output_packet,
         };
         Ok(Self {
             hash: hash_buffer(to_yaml(&pod_job_no_hash)?),
@@ -248,9 +255,18 @@ impl PodResult {
                 .output_spec
                 .iter()
                 .filter_map(|(packet_key, path_info)| {
-                    let location = URI {
-                        namespace: pod_job.output_dir.namespace.clone(),
-                        path: pod_job.output_dir.path.join(&path_info.path),
+                    let location = match &pod_job.output_packet {
+                        Some(pkt) => match pkt.0.get(packet_key) {
+                            Some(PathSet::Unary { blob }) => blob.location.clone(),
+                            _ => URI {
+                                namespace: pod_job.output_dir.namespace.clone(),
+                                path: pod_job.output_dir.path.join(&path_info.path),
+                            },
+                        },
+                        None => URI {
+                            namespace: pod_job.output_dir.namespace.clone(),
+                            path: pod_job.output_dir.path.join(&path_info.path),
+                        },
                     };
 
                     let local_location = match get(namespace_lookup, &location.namespace) {

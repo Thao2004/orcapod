@@ -8,7 +8,7 @@ use fixture::{
 use futures_util::future::join_all;
 use orcapod::uniffi::{
     error::{OrcaError, Result},
-    model::{Packet, URI},
+    model::{Blob, BlobKind, Packet, PathInfo, PathSet, Pod, PodJob, URI},
     orchestrator::{
         ImageKind, Orchestrator as _, PodRun, PodStatus, docker::LocalDockerOrchestrator,
     },
@@ -195,5 +195,213 @@ async fn verify_pod_result_not_running() -> Result<()> {
         statuses.is_empty(),
         "Some pod results returned in a status other than `Completed`."
     );
+    Ok(())
+}
+
+#[test]
+fn output_packet_custom_paths() -> Result<()> {
+    let test_dirs = TestDirs::new(&HashMap::from([("default".to_owned(), None::<&str>)]))?;
+    let namespace_lookup = test_dirs.namespace_lookup();
+    let orchestrator = LocalDockerOrchestrator::new()?;
+
+    // Simple pod: no inputs, writes a fixed value to /tmp/output/answer.txt
+    let pod = Arc::new(Pod::new(
+        "alpine:3.14".into(),
+        vec!["sh".into(), "-c".into(), "echo 7 > /tmp/output/answer.txt".into()],
+        HashMap::new(),
+        PathBuf::from("/tmp/output"),
+        HashMap::from([(
+            "answer".to_owned(),
+            PathInfo {
+                path: PathBuf::from("answer.txt"),
+                match_pattern: r".*\.txt".to_owned(),
+            },
+        )]),
+        "https://github.com/place/holder".into(),
+        0.1,
+        10_u64 << 20,
+        None,
+        None,
+    )?);
+
+    // Route "answer" to a custom external path instead of output_dir/answer.txt
+    let custom_path = PathBuf::from("results/session-1-alice/answer.txt");
+    let pod_job = PodJob::new(
+        Arc::clone(&pod),
+        Packet(HashMap::new()).into(),
+        URI {
+            namespace: "default".to_owned(),
+            path: PathBuf::from("staging"),
+        },
+        0.1,
+        10_u64 << 20,
+        &namespace_lookup,
+        None,
+        None,
+        Some(
+            Packet(HashMap::from([(
+                "answer".to_owned(),
+                PathSet::Unary {
+                    blob: Blob {
+                        kind: BlobKind::File,
+                        location: URI {
+                            namespace: "default".to_owned(),
+                            path: custom_path.clone(),
+                        },
+                        checksum: String::new(),
+                    },
+                },
+            )]))
+            .into(),
+        ),
+    )?;
+
+    let pod_run = orchestrator.start_blocking(&namespace_lookup, &pod_job)?;
+    let pod_result = orchestrator.get_result_blocking(&namespace_lookup, &pod_run)?;
+    orchestrator.delete_blocking(&pod_run)?;
+
+    assert_eq!(pod_result.status, PodStatus::Completed, "Pod did not complete.");
+
+    // Output must land at the custom path, not under the staging output_dir
+    let custom_host_path = namespace_lookup["default"].join(&custom_path);
+    assert!(
+        custom_host_path.exists(),
+        "Output not found at custom path: {custom_host_path:?}"
+    );
+    let staging_answer = namespace_lookup["default"].join("staging/answer.txt");
+    assert!(
+        !staging_answer.exists(),
+        "Output was incorrectly written to staging dir: {staging_answer:?}"
+    );
+
+    // PodResult's output_packet must reflect the custom URI with a populated checksum
+    match &pod_result.output_packet.0["answer"] {
+        PathSet::Unary { blob } => {
+            assert_eq!(
+                blob.location.path, custom_path,
+                "PodResult URI didn't match output_packet."
+            );
+            assert!(
+                !blob.checksum.is_empty(),
+                "Checksum should be populated after execution."
+            );
+        }
+        PathSet::Collection { .. } => panic!("Expected Unary PathSet."),
+    }
+
+    Ok(())
+}
+
+#[test]
+fn output_packet_partial_coverage() -> Result<()> {
+    let test_dirs = TestDirs::new(&HashMap::from([("default".to_owned(), None::<&str>)]))?;
+    let namespace_lookup = test_dirs.namespace_lookup();
+    let orchestrator = LocalDockerOrchestrator::new()?;
+
+    // Pod with two outputs: "answer" (remapped) and "metadata" (fallback to output_dir)
+    let pod = Arc::new(Pod::new(
+        "alpine:3.14".into(),
+        vec![
+            "sh".into(),
+            "-c".into(),
+            "echo 7 > /tmp/output/answer.txt && echo meta > /tmp/output/metadata.txt".into(),
+        ],
+        HashMap::new(),
+        PathBuf::from("/tmp/output"),
+        HashMap::from([
+            (
+                "answer".to_owned(),
+                PathInfo {
+                    path: PathBuf::from("answer.txt"),
+                    match_pattern: r".*\.txt".to_owned(),
+                },
+            ),
+            (
+                "metadata".to_owned(),
+                PathInfo {
+                    path: PathBuf::from("metadata.txt"),
+                    match_pattern: r".*\.txt".to_owned(),
+                },
+            ),
+        ]),
+        "https://github.com/place/holder".into(),
+        0.1,
+        10_u64 << 20,
+        None,
+        None,
+    )?);
+
+    // output_packet only covers "answer"; "metadata" falls back to output_dir
+    let custom_path = PathBuf::from("results/session-1-alice/answer.txt");
+    let output_dir = URI {
+        namespace: "default".to_owned(),
+        path: PathBuf::from("staging"),
+    };
+    let pod_job = PodJob::new(
+        Arc::clone(&pod),
+        Packet(HashMap::new()).into(),
+        output_dir.clone(),
+        0.1,
+        10_u64 << 20,
+        &namespace_lookup,
+        None,
+        None,
+        Some(
+            Packet(HashMap::from([(
+                "answer".to_owned(),
+                PathSet::Unary {
+                    blob: Blob {
+                        kind: BlobKind::File,
+                        location: URI {
+                            namespace: "default".to_owned(),
+                            path: custom_path.clone(),
+                        },
+                        checksum: String::new(),
+                    },
+                },
+            )]))
+            .into(),
+        ),
+    )?;
+
+    let pod_run = orchestrator.start_blocking(&namespace_lookup, &pod_job)?;
+    let pod_result = orchestrator.get_result_blocking(&namespace_lookup, &pod_run)?;
+    orchestrator.delete_blocking(&pod_run)?;
+
+    assert_eq!(pod_result.status, PodStatus::Completed, "Pod did not complete.");
+
+    // "answer" must be at the custom path
+    let custom_host_path = namespace_lookup["default"].join(&custom_path);
+    assert!(
+        custom_host_path.exists(),
+        "Remapped output not found at custom path: {custom_host_path:?}"
+    );
+
+    // "metadata" must be at output_dir/metadata.txt (fallback)
+    let fallback_metadata = namespace_lookup["default"].join("staging/metadata.txt");
+    assert!(
+        fallback_metadata.exists(),
+        "Fallback output not found at output_dir: {fallback_metadata:?}"
+    );
+
+    // PodResult: "answer" URI reflects the custom path
+    match &pod_result.output_packet.0["answer"] {
+        PathSet::Unary { blob } => assert_eq!(
+            blob.location.path, custom_path,
+            "PodResult URI for 'answer' didn't match output_packet."
+        ),
+        PathSet::Collection { .. } => panic!("Expected Unary PathSet for 'answer'."),
+    }
+
+    // PodResult: "metadata" URI reflects output_dir fallback
+    let expected_metadata_path = output_dir.path.join("metadata.txt");
+    match &pod_result.output_packet.0["metadata"] {
+        PathSet::Unary { blob } => assert_eq!(
+            blob.location.path, expected_metadata_path,
+            "PodResult URI for 'metadata' should use output_dir fallback."
+        ),
+        PathSet::Collection { .. } => panic!("Expected Unary PathSet for 'metadata'."),
+    }
+
     Ok(())
 }
