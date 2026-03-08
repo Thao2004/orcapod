@@ -55,7 +55,7 @@ fn pod_to_yaml() -> Result<()> {
 fn hash_pod_job() -> Result<()> {
     assert_eq!(
         pod_job_style(&NAMESPACE_LOOKUP_READ_ONLY)?.hash,
-        "ba1c4693f9186ccb1b6e63625085d8fd95552b28b7a60fe9b1b47f68a9ba8880",
+        "b6c5a394752e7d5bf450948e8bdc7063526c6d8a3074c07a64a4bb5aea69580c",
         "Hash didn't match."
     );
     Ok(())
@@ -86,9 +86,19 @@ fn pod_job_to_yaml() -> Result<()> {
                   namespace: default
                   path: styles/mosaic.t7
                 checksum: fbd7d882e9e02aafb57366e726762025ff6b2e12cd41abd44b874542b7693771
-            output_dir:
-              namespace: default
-              path: output
+            output_packet:
+              result1:
+                kind: File
+                location:
+                  namespace: default
+                  path: output/result1.jpeg
+                checksum: ''
+              result2:
+                kind: File
+                location:
+                  namespace: default
+                  path: output/result2.jpeg
+                checksum: ''
             cpu_limit: 0.5
             memory_limit: 2147483648
             env_vars:
@@ -104,7 +114,7 @@ fn pod_job_to_yaml() -> Result<()> {
 fn hash_pod_result() -> Result<()> {
     assert_eq!(
         pod_result_style(&NAMESPACE_LOOKUP_READ_ONLY)?.hash,
-        "2df336726032846259efcb0fae11e0d51c475d4a6d174245ac1a7cd18e88e598",
+        "629cd9792563fd722f2636a8b22a4970f9ea7c12a5baa2f682efed01c9c30325",
         "Hash didn't match."
     );
     Ok(())
@@ -116,7 +126,7 @@ fn pod_result_to_yaml() -> Result<()> {
         to_yaml(&pod_result_style(&NAMESPACE_LOOKUP_READ_ONLY)?)?,
         indoc! {"
             class: pod_result
-            pod_job: ba1c4693f9186ccb1b6e63625085d8fd95552b28b7a60fe9b1b47f68a9ba8880
+            pod_job: b6c5a394752e7d5bf450948e8bdc7063526c6d8a3074c07a64a4bb5aea69580c
             output_packet:
               result1:
                 kind: File
