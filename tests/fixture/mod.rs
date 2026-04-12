@@ -126,23 +126,23 @@ pub fn pod_job_segment(namespace_lookup: &HashMap<String, PathBuf, RandomState>)
         ]),
         HashMap::from([
             (
-                "result1".to_owned(),
+                "overlay_image1".to_owned(),
                 Blob {
                     kind: BlobKind::File,
                     location: URI {
                         namespace: "default".to_owned(),
-                        path: PathBuf::from("output/result1.jpeg"),
+                        path: PathBuf::from("output/overlay_image1.png"),
                     },
                     checksum: String::new(),
                 },
             ),
             (
-                "result2".to_owned(),
+                "overlay_image2".to_owned(),
                 Blob {
                     kind: BlobKind::File,
                     location: URI {
                         namespace: "default".to_owned(),
-                        path: PathBuf::from("output/result2.jpeg"),
+                        path: PathBuf::from("output/overlay_image2.png"),
                     },
                     checksum: String::new(),
                 },
